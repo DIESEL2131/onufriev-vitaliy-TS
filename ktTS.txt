@@ -1,0 +1,186 @@
+// Интерфейсы
+interface IUser {
+    uid: number;
+    login: string;
+    password: string;
+    phone: string;
+    verification: boolean;
+    publicData: { firstname: string; surname: string; nickname: string; age: number; image: string };
+    privateData: { cardNumber: number; geo: string; balance: number; tokens: ICoin[]; transactionHistory: ITransaction[] };
+    settings: { mode: "Dark" | "Light"; showImage: boolean; readyToRecieve: boolean; readyToSwap: boolean; transactionsCount: number; lastTransaction: string; online: boolean };
+}
+
+interface ITransaction {
+    userTrigger: number;
+    userReceiver: number;
+    userTriggerPayment: boolean;
+    userReceiverPayment: boolean;
+    date: string;
+    amount: number;
+    status: "Pending" | "Success" | "Error";
+}
+
+interface ICoin {
+    name: string;
+    description: string;
+    currency: number;
+    originURL: string;
+}
+
+// Класс UserManager
+class UserManager {
+    private users: IUser[] = [];
+    private tokenTypes: ICoin[] = [
+        { name: "Bitcoin", description: "Digital currency", currency: 50000, originURL: "https://bitcoin.org" },
+        { name: "Ethereum", description: "Blockchain platform", currency: 3000, originURL: "https://ethereum.org" }
+    ];
+
+    // Регистрация
+    signUp(login: string, password: string, repeatPassword: string) {
+        if (password !== repeatPassword) return { status: 400, text: "Bad Request", message: "Passwords do not match" };
+        if (this.users.some(user => user.login === login)) return { status: 409, text: "Conflict", message: "Login already taken" };
+
+        // Проверка длины логина и пароля
+        if (login.length < 3 || login.length > 20) return { status: 400, text: "Bad Request", message: "Login must be between 3 and 20 characters" };
+        if (password.length < 6) return { status: 400, text: "Bad Request", message: "Password must be at least 6 characters long" };
+
+        // Проверка на отсутствие специальных символов в логине
+        const loginRegex = /^[a-zA-Z0-9]+$/;
+        if (!loginRegex.test(login)) return { status: 400, text: "Bad Request", message: "Login must contain only letters and numbers" };
+
+        const uid = this.users.length + 1;
+        this.users.push({
+            uid,
+            login,
+            password,
+            phone: "",
+            verification: false,
+            publicData: { firstname: "", surname: "", nickname: "", age: 0, image: "" },
+            privateData: { cardNumber: 0, geo: "", balance: 0, tokens: [], transactionHistory: [] },
+            settings: { mode: "Light", showImage: true, readyToRecieve: false, readyToSwap: false, transactionsCount: 0, lastTransaction: "", online: false }
+        });
+
+        // Авторизация пользователя после успешной регистрации
+        return this.signIn(login, password);
+    }
+
+    // Авторизация
+    signIn(login: string, password: string) {
+        const user = this.users.find(user => user.login === login);
+        if (!user) return { status: 404, text: "Not Found", message: "User not found" };
+        if (user.password !== password) return { status: 401, text: "Unauthorized", message: "Incorrect password" };
+
+        user.settings.online = true;
+        return { status: 200, text: "OK", message: "Login success" };
+    }
+
+    // Верификация
+    verify(uid: number, phone: string, age: number, cardNumber: number, geo: string) {
+        const user = this.users.find(user => user.uid === uid);
+        if (!user) return { status: 404, text: "Not Found", message: "User not found" };
+
+        user.phone = phone;
+        user.publicData.age = age;
+        user.privateData.cardNumber = cardNumber;
+        user.privateData.geo = geo;
+        user.verification = true;
+        return { status: 200, text: "OK", message: "Verification success" };
+    }
+
+    // Восстановление пароля
+    forgetPwd(login: string, phone: string, newPassword: string) {
+        const user = this.users.find(user => user.login === login && user.phone === phone);
+        if (!user) return { status: 404, text: "Not Found", message: "User not found or phone mismatch" };
+
+        user.password = newPassword;
+        return { status: 200, text: "OK", message: "Password updated" };
+    }
+
+    // Транзакция
+    transactionTrigger(uidTrigger: number, uidReceiver: number, amount: number, tokenName: string) {
+        const userTrigger = this.users.find(user => user.uid === uidTrigger);
+        const userReceiver = this.users.find(user => user.uid === uidReceiver);
+        if (!userTrigger || !userReceiver) return { status: 404, text: "Not Found", message: "User not found" };
+
+        const token = this.tokenTypes.find(token => token.name === tokenName);
+        if (!token) return { status: 400, text: "Bad Request", message: "Invalid token type" };
+
+        const cost = amount * token.currency;
+        if (userTrigger.privateData.balance < cost) return { status: 402, text: "Payment Required", message: "Insufficient balance" };
+
+        // Проверка баланса у получателя
+        if (userReceiver.privateData.balance + cost > Number.MAX_SAFE_INTEGER) return { status: 402, text: "Payment Required", message: "Receiver balance overflow" };
+
+        userTrigger.privateData.balance -= cost;
+        userReceiver.privateData.balance += cost;
+
+        const transaction: ITransaction = {
+            userTrigger: uidTrigger,
+            userReceiver: uidReceiver,
+            userTriggerPayment: true,
+            userReceiverPayment: true,
+            date: new Date().toISOString(),
+            amount: amount,
+            status: "Success"
+        };
+        userTrigger.privateData.transactionHistory.push(transaction);
+        userReceiver.privateData.transactionHistory.push(transaction);
+
+        return { status: 200, text: "OK", message: "Transaction success" };
+    }
+
+    // Принятие сделки
+    transactionRecieve(uid: number, transactionId: number) {
+        const user = this.users.find(user => user.uid === uid);
+        if (!user) return { status: 404, text: "Not Found", message: "User not found" };
+
+        const transaction = user.privateData.transactionHistory.find(t => t.userTrigger === transactionId);
+        if (!transaction) return { status: 404, text: "Not Found", message: "Transaction not found" };
+
+        if (transaction.status !== "Pending") return { status: 400, text: "Bad Request", message: "Transaction is not pending" };
+
+        const userTrigger = this.users.find(user => user.uid === transaction.userTrigger);
+        if (!userTrigger) return { status: 404, text: "Not Found", message: "Trigger user not found" };
+
+        const token = this.tokenTypes.find(token => token.name === transaction.amount.toString());
+        if (!token) return { status: 400, text: "Bad Request", message: "Invalid token type" };
+
+        const cost = transaction.amount * token.currency;
+        if (userTrigger.privateData.balance < cost) return { status: 402, text: "Payment Required", message: "Insufficient balance" };
+
+        userTrigger.privateData.balance -= cost;
+        user.privateData.balance += cost;
+
+        transaction.status = "Success";
+        return { status: 200, text: "OK", message: "Transaction received successfully" };
+    }
+
+    // Обновление профиля
+    updateProfile(uid: number, publicData: IUser["publicData"]) {
+        const user = this.users.find(user => user.uid === uid);
+        if (!user) return { status: 404, text: "Not Found", message: "User not found" };
+
+        user.publicData = publicData;
+        return { status: 200, text: "OK", message: "Profile updated" };
+    }
+
+    // Дополнительная функция: смена темы
+    changeTheme(uid: number, theme: "Dark" | "Light") {
+        const user = this.users.find(user => user.uid === uid);
+        if (!user) return { status: 404, text: "Not Found", message: "User not found" };
+
+        user.settings.mode = theme;
+        return { status: 200, text: "OK", message: "Theme changed successfully" };
+    }
+}
+
+// Пример использования
+const userManager = new UserManager();
+
+console.log("Регистрация пользователя:", userManager.signUp("user1", "password123", "password123"));
+console.log("Авторизация пользователя:", userManager.signIn("user1", "password123"));
+console.log("Верификация пользователя:", userManager.verify(1, "1234567890", 25, 1234567890, "Russia"));
+console.log("Восстановление пароля:", userManager.forgetPwd("user1", "1234567890", "newpassword123"));
+console.log("Транзакция:", userManager.transactionTrigger(1, 2, 1, "Bitcoin"));
+console.log("Обновление профиля:", userManager.updateProfile(1, { firstname: "John", surname: "Doe", nickname: "johndoe", age: 25, image: "" }));
+console.log("Смена темы:", userManager.changeTheme(1, "Dark"));
